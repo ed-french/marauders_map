@@ -28,16 +28,75 @@
 #define SD_SCLK             14
 #define SD_CS               15
 
+#define IMAGE_INTERVAL_S 30
+#define TOUCH_THRESHOLD 60 // Greater is more sensitive. 40 currently self-triggers
+RTC_DATA_ATTR int bootCount = 0;
+touch_pad_t touchPin;
+esp_sleep_wakeup_cause_t wakeup_reason;
+
 //const char* ssid = "ssid";
 //const char* password = "password";
 
-String serverName = "http://192.168.1.125/marauders_map_full";
+//String serverName = "http://192.168.1.125/loki_eink";//marauders_map_full";
+const char * photo_url="http://192.168.1.125/loki_eink";
+const char   * map_url="http://192.168.1.125/marauders_map_full";
 
 WiFiMulti wifiMulti;
 
 
 uint8_t *framebuffer;
 int vref = 1100;
+
+/*
+Method to print the reason by which ESP32
+has been awaken from sleep
+*/
+void print_wakeup_reason(){
+  
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch(wakeup_reason)
+  {
+    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
+    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
+    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
+    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
+  }
+}
+
+/*
+Method to print the touchpad by which ESP32
+has been awaken from sleep
+*/
+void print_wakeup_touchpad(){
+  touchPin = esp_sleep_get_touchpad_wakeup_status();
+  Serial.printf("Touch pin status: %d\n",touchPin);
+
+  switch(touchPin)
+  {
+    case 0  : Serial.println("Touch detected on GPIO 4"); break;
+    case 1  : Serial.println("Touch detected on GPIO 0"); break;
+    case 2  : Serial.println("Touch detected on GPIO 2"); break;
+    case 3  : Serial.println("Touch detected on GPIO 15"); break;
+    case 4  : Serial.println("Touch detected on GPIO 13"); break;
+    case 5  : Serial.println("Touch detected on GPIO 12"); break;
+    case 6  : Serial.println("Touch detected on GPIO 14"); break;
+    case 7  : Serial.println("Touch detected on GPIO 27"); break;
+    case 8  : Serial.println("Touch detected on GPIO 33"); break;
+    case 9  : Serial.println("Touch detected on GPIO 32"); break;
+    default : Serial.println("Wakeup not by touchpad"); break;
+  }
+}
+
+void callback()
+{
+  //placeholder callback function
+  Serial.println("Callback triggered");
+}
+
 
 void setup()
 {
@@ -46,6 +105,24 @@ void setup()
     Serial.begin(115200);
     delay(500);
     Serial.println("booted");
+
+    
+    //Increment boot number and print it every reboot
+    ++bootCount;
+    Serial.println("Boot number: " + String(bootCount));
+
+    //Print the wakeup reason for ESP32 and touchpad too
+    print_wakeup_reason();
+    print_wakeup_touchpad();
+
+    
+    //Setup interrupt on Touch Pad 3 (GPIO15)
+    // Changed to T5 which is GPIO12
+    touchAttachInterrupt(T5, callback, TOUCH_THRESHOLD);
+
+    //Configure Touchpad as wakeup source
+    esp_sleep_enable_touchpad_wakeup();
+
 
     wifiMulti.addAP(ssid, password);
  
@@ -216,40 +293,35 @@ void draw_cat(uint16_t mid_x,uint16_t mid_y)
     }
 }
 
-void loop()
+void fetch_and_show(const char * url, uint8_t write_count=1)
 {
-    // When reading the battery voltage, POWER_EN must be turned on
-
-    uint8_t * i_data;
-
-    while (true)
+    memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
+    epd_poweron();
+    epd_clear();
+    if((wifiMulti.run() == WL_CONNECTED))
     {
-    //   reveal_image((uint8_t *)beach_data);
-    //   reveal_image((uint8_t *)cave_data);
-        memset(framebuffer, 0xFF, EPD_WIDTH * EPD_HEIGHT / 2);
-        epd_poweron();
-        epd_clear();
-        if((wifiMulti.run() == WL_CONNECTED))
+
+        HTTPClient http;
+
+        USE_SERIAL.print("[HTTP] begin...\n");
+        //const char * url;
+        // configure server and url
+
+        Serial.printf("Selected url: %s\n",url);
+        http.begin(url);
+        //http.begin("192.168.1.12", 80, "/test.html");
+
+        USE_SERIAL.print("[HTTP] GET...\n");
+        // start connection and send HTTP header
+        int httpCode = http.GET();
+        if(httpCode > 0)
         {
-
-            HTTPClient http;
-
-            USE_SERIAL.print("[HTTP] begin...\n");
-
-            // configure server and url
-            http.begin(serverName.c_str());
-            //http.begin("192.168.1.12", 80, "/test.html");
-
-            USE_SERIAL.print("[HTTP] GET...\n");
-            // start connection and send HTTP header
-            int httpCode = http.GET();
-            if(httpCode > 0)
-            {
-            // HTTP header has been send and Server response header has been handled
-            USE_SERIAL.printf("[HTTP] GET... code: %d\n", httpCode);
+        // HTTP header has been send and Server response header has been handled
+        USE_SERIAL.printf("[HTTP] GET... code: %d\n", httpCode);
 
             // file found at server
-            if(httpCode == HTTP_CODE_OK) {
+            if(httpCode == HTTP_CODE_OK)
+            {
 
                 // get length of document (is -1 when Server sends no Content-Length header)
                 int len = http.getSize()-8;
@@ -287,7 +359,8 @@ void loop()
 
                 uint8_t * screen_ptr=framebuffer;
                 uint32_t timeout=millis()+20000; // Max 20 seconds
-                while(http.connected() && (len > 0 || len == -1)) {
+                while(http.connected() && (len > 0 || len == -1))
+                {
                     // get available data size
                     if (millis()>timeout)
                     {
@@ -296,46 +369,82 @@ void loop()
                     } 
                     size_t size = stream->available();
 
-                    if(size) {
+                    if(size)
+                    {
                         // read up to 128 byte
                         int c = stream->readBytes(screen_ptr, ((size > sizeof(buff)) ? sizeof(buff) : size));
                         screen_ptr+=c;
                         // write it to Serial
                         USE_SERIAL.printf("Written another : %d bytes to screenbuffer, %d left...\n",c,len);
 
-                        if(len > 0) {
+                        if(len > 0)
+                        {
                             len -= c;
                         }
                     } 
                     delay(1);
-                }
+                } // End of loop fetching bytes
 
-                for (uint16_t z=20;z<500;z+=50)
-                {
-                    draw_cat(z,z);
-                }
+                // for (uint16_t z=20;z<500;z+=50)
+                // {
+                //     draw_cat(z,z);
+                // }
 
                 USE_SERIAL.println();
                 USE_SERIAL.print("[HTTP] connection closed or file end.\n");
                 
 
-
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
-                epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                for (uint8_t wc=0;wc<write_count;wc++)
+                {
+                    epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE); 
+                }
+                
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
+                // epd_draw_image(epd_full_screen(), framebuffer, BLACK_ON_WHITE);
                 USE_SERIAL.println("Image drawn");
 
-            }
+            } // End of handling a good http response code
+            else
+            {
+                USE_SERIAL.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+            } // End of handling a bad http response code
         } else {
-            USE_SERIAL.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+            Serial.println("No response code received");
         }
+        
+        http.end();   
+    } // End of handling being connected OK
 
-        http.end();
+    
+    
+} // End of the function as a whole
+
+void loop()
+{
+    // When reading the battery voltage, POWER_EN must be turned on
+
+    uint8_t * i_data;
+
+    if (true)
+    {
+    //   reveal_image((uint8_t *)beach_data);
+    //   reveal_image((uint8_t *)cave_data);
+        const char * server_name;
+        if (touchPin==10)
+        {
+            Serial.println("Using photos");
+            server_name=photo_url;
+        } else {
+            Serial.println("Using map");
+            server_name=map_url;
+        }
+        fetch_and_show(server_name);
+        //delay(10000);
     }
     // uint16_t v = analogRead(BATT_PIN);
     // float battery_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (vref / 1000.0);
@@ -351,9 +460,16 @@ void loop()
     //It will turn off the power of the entire
     // POWER_EN control and also turn off the blue LED light
 
-        delay(10000);
-    }
+        
+    
     epd_poweroff();
     epd_poweroff_all();
+      //Go to sleep now
+    
+    Serial.println("Going to sleep now");
+    esp_sleep_enable_timer_wakeup(IMAGE_INTERVAL_S*1000000L);
+    delay(5000);
+    esp_deep_sleep_start();
+    Serial.println("This will never be printed");
     
 }
